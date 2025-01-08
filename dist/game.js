@@ -269,6 +269,7 @@ class Game {
         this.keysPressed = {};
         this.bullets = [];
         this.score = 0;
+        this.gameOver = false;
         setInterval(() => {
             this.spawnEnemy();
         }, 2000);
@@ -281,6 +282,10 @@ class Game {
             this.updatePlayerInput();
         });
         (_a = this.canvas.getCanvas()) === null || _a === void 0 ? void 0 : _a.addEventListener("click", (event) => {
+            if (this.gameOver) {
+                this.restartGame();
+                return;
+            }
             if (this.players.length === 0)
                 return;
             const canvasElement = this.canvas.getCanvas();
@@ -382,6 +387,14 @@ class Game {
     // | |_| |/ ___ \| |  | | |___  | |__| |_| | |_| |  __/
     //  \____/_/   \_\_|  |_|_____| |_____\___/ \___/|_|
     gameLoop(currentTime) {
+        if (this.gameOver) {
+            const centerX = this.canvas.getWidth() / 2;
+            const centerY = this.canvas.getHeight() / 2;
+            this.canvas.drawText("Game Over", new Vector2D(centerX - 70, centerY - 40), "red");
+            this.canvas.drawText("Click to Restart", new Vector2D(centerX - 90, centerY), "white");
+            this.canvas.drawText("Score: " + this.score, new Vector2D(centerX - 55, centerY + 40), "yellow");
+            return;
+        }
         const deltaTime = Math.min((currentTime - this.lastTime) / 1000, 0.1);
         this.lastTime = currentTime;
         this.canvas.initCanvas();
@@ -393,6 +406,9 @@ class Game {
             const healthBarPos = new Vector2D(player.getPosition().x, player.getPosition().y - 8);
             this.canvas.drawRect(healthBarPos, (player.getWidth() * player.getCurrentHP()) / player.getMaxHP(), 4, "red");
             this.canvas.drawStroke(healthBarPos, (player.getWidth() * player.getCurrentHP()) / player.getMaxHP(), 5, "white");
+            if (player.getCurrentHP() <= 0) {
+                this.gameOver = true;
+            }
         });
         // Draw bullets
         this.bullets.forEach((bullet) => {
@@ -413,6 +429,7 @@ class Game {
                         enemy.reduceHP(2);
                         this.deleteBullet(bullet);
                         this.deleteEnemy(enemy);
+                        this.score += 1;
                     }
                 });
             }
@@ -435,11 +452,24 @@ class Game {
                 });
             }
         });
+        // display score
+        this.canvas.drawText("Score: " + this.score.toString(), new Vector2D(20, 20), "yellow");
         requestAnimationFrame((time) => this.gameLoop(time));
     }
     startGame() {
         this.lastTime = performance.now();
         requestAnimationFrame((time) => this.gameLoop(time));
+    }
+    restartGame() {
+        this.players = [];
+        this.enemies = [];
+        this.bullets = [];
+        this.score = 0;
+        this.gameOver = false;
+        const spawnPosition = new Vector2D(80, 80);
+        const firstPlayer = new Player(spawnPosition);
+        this.addPlayer(firstPlayer);
+        this.startGame();
     }
 }
 // Initialize game

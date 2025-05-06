@@ -23,13 +23,31 @@ class Vector2D {
 // Canvas class
 class Canvas {
     constructor() {
-        this.canvas = document.getElementById("canvas");
-        if (this.canvas)
-            this.ctx = this.canvas.getContext("2d");
-        this.width = 1400;
-        this.height = 700;
+        const canvasElement = document.getElementById("canvas");
+        if (!canvasElement) {
+            throw new Error("Canvas element with ID 'canvas' not found.");
+        }
+        this.canvas = canvasElement;
+        const context = this.canvas.getContext("2d");
+        if (!context) {
+            throw new Error("Failed to get 2D rendering context from canvas.");
+        }
+        this.ctx = context;
+        // Set initial dimensions to window size
+        this.width = window.innerWidth;
+        this.height = window.innerHeight;
         this.canvas.width = this.width;
         this.canvas.height = this.height;
+        // Add event listener for window resize
+        window.addEventListener("resize", this.handleResize.bind(this));
+    }
+    handleResize() {
+        this.width = window.innerWidth;
+        this.height = window.innerHeight;
+        this.canvas.width = this.width;
+        this.canvas.height = this.height;
+        // The game loop calls initCanvas, so it will redraw the background.
+        // If other elements need immediate repositioning, you might add calls here.
     }
     initCanvas() {
         if (this.ctx) {
@@ -57,11 +75,23 @@ class Canvas {
             this.ctx.strokeRect(position.x, position.y, width, height);
         }
     }
-    drawText(text, position, color) {
+    drawText(text, position, color, font = "20px Arial", textAlign = "left") {
         if (this.ctx) {
             this.ctx.fillStyle = color;
-            this.ctx.font = "20px Arial";
+            this.ctx.font = font;
+            this.ctx.textAlign = textAlign;
             this.ctx.fillText(text, position.x, position.y);
+            this.ctx.textAlign = "left";
+        }
+    }
+    drawLine(startPos, endPos, color, lineWidth = 1) {
+        if (this.ctx) {
+            this.ctx.beginPath();
+            this.ctx.moveTo(startPos.x, startPos.y);
+            this.ctx.lineTo(endPos.x, endPos.y);
+            this.ctx.strokeStyle = color;
+            this.ctx.lineWidth = lineWidth;
+            this.ctx.stroke();
         }
     }
     getCanvas() {
@@ -77,7 +107,7 @@ class Canvas {
 class Bullet {
     constructor(position, direction) {
         this.position = position;
-        this.hasCollided = 0;
+        this.timesCollidedWall = 0;
         this.direction = direction;
         this.radius = 5;
     }
@@ -99,19 +129,19 @@ class Bullet {
         // Check if collide left and right
         this.position.x - this.radius < 0 ||
             this.position.x + this.radius > canvasWidth) {
-            this.hasCollided += 1;
+            this.timesCollidedWall += 1;
             this.direction = new Vector2D(-this.direction.x, this.direction.y);
         }
         if (
         // Check if collide top and bot
         this.position.y - this.radius < 0 ||
             this.position.y + this.radius > canvasHeight) {
-            this.hasCollided += 1;
+            this.timesCollidedWall += 1;
             this.direction = new Vector2D(this.direction.x, -this.direction.y);
         }
     }
-    getCollideTime() {
-        return this.hasCollided;
+    getWallCollideTime() {
+        return this.timesCollidedWall;
     }
 }
 class Player {
@@ -125,10 +155,10 @@ class Player {
         this.acceleration = 1000;
         this.friction = 0.95;
         this.input = new Vector2D(0, 0);
-        this.isShooting = false;
         this.width = 50;
         this.height = 50;
         this.color = "blue";
+        this.shootingCoolDownTime = 0;
     }
     getPlayer() {
         return this;
@@ -196,13 +226,25 @@ class Player {
         if (this.position.y + this.height > canvasHeight)
             this.position.y = canvasHeight - this.height;
     }
+    getShootingCoolDownTime() {
+        return this.shootingCoolDownTime;
+    }
+    reduceShootingCoolDownTime(time) {
+        if (this.shootingCoolDownTime - time < 0)
+            this.shootingCoolDownTime = 0;
+        else
+            this.shootingCoolDownTime -= time;
+    }
     shoot(mousePosition) {
+        if (this.shootingCoolDownTime > 0) {
+            return null;
+        }
         const playerCenter = new Vector2D(this.position.x + this.width / 2, this.position.y + this.height / 2);
         const direction = mousePosition
             .add(new Vector2D(-playerCenter.x, -playerCenter.y))
             .normalize();
         const bullet = new Bullet(playerCenter, direction);
-        this.isShooting = true;
+        this.shootingCoolDownTime = 2; // 2 seconds cooldown for shooting a bullet
         return bullet;
     }
 }
@@ -260,7 +302,7 @@ class Enemy {
 }
 class Game {
     constructor() {
-        var _a;
+        var _a, _b;
         this.canvas = new Canvas();
         this.canvas.initCanvas();
         this.players = [];
@@ -270,9 +312,20 @@ class Game {
         this.bullets = [];
         this.score = 0;
         this.gameOver = false;
+        this.mousePosition = null;
         setInterval(() => {
             this.spawnEnemy();
-        }, 2000);
+        }, 4000);
+        (_a = this.canvas
+            .getCanvas()) === null || _a === void 0 ? void 0 : _a.addEventListener("mousemove", (event) => {
+            const canvasElement = this.canvas.getCanvas();
+            if (canvasElement) {
+                const canvasRect = canvasElement.getBoundingClientRect();
+                const mouseX = event.clientX - canvasRect.left;
+                const mouseY = event.clientY - canvasRect.top;
+                this.mousePosition = new Vector2D(mouseX, mouseY);
+            }
+        });
         window.addEventListener("keydown", (event) => {
             this.keysPressed[event.key.toLowerCase()] = true;
             this.updatePlayerInput();
@@ -281,7 +334,7 @@ class Game {
             this.keysPressed[event.key.toLowerCase()] = false;
             this.updatePlayerInput();
         });
-        (_a = this.canvas.getCanvas()) === null || _a === void 0 ? void 0 : _a.addEventListener("click", (event) => {
+        (_b = this.canvas.getCanvas()) === null || _b === void 0 ? void 0 : _b.addEventListener("click", (event) => {
             if (this.gameOver) {
                 this.restartGame();
                 return;
@@ -295,7 +348,8 @@ class Game {
                 const mouseY = event.clientY - canvasRect.top;
                 const mousePosition = new Vector2D(mouseX, mouseY);
                 const newBullet = this.players[0].shoot(mousePosition);
-                this.bullets.push(newBullet);
+                if (newBullet)
+                    this.bullets.push(newBullet);
             }
         });
     }
@@ -349,7 +403,7 @@ class Game {
                 bulletLeft < targetRight &&
                 bulletBottom > targetTop &&
                 bulletTop < targetBottom &&
-                bullet.getCollideTime() >= 1);
+                bullet.getWallCollideTime() >= 1);
         }
         else
             return (bulletRight > targetLeft &&
@@ -381,6 +435,45 @@ class Game {
     deleteBullet(bullet) {
         this.bullets = this.bullets.filter((b) => b !== bullet);
     }
+    drawUI() {
+        const scoreText = "Score: " + this.score.toString();
+        const scoreFont = "bold 20px 'Segoe UI', 'Arial', sans-serif";
+        const scoreColor = "#FFFFFF";
+        const panelPadding = 10;
+        const scorePanelPosition = new Vector2D(15, 15);
+        const scorePanelHeight = 30;
+        const scorePanelWidth = 160;
+        this.canvas.drawRect(scorePanelPosition, scorePanelWidth, scorePanelHeight, "rgba(20, 20, 20, 0.75)");
+        this.canvas.drawStroke(scorePanelPosition, scorePanelWidth, scorePanelHeight, "rgba(150, 150, 150, 0.4)");
+        const textX = scorePanelPosition.x + panelPadding;
+        const textY = scorePanelPosition.y + scorePanelHeight / 2 + 7;
+        this.canvas.drawText(scoreText, new Vector2D(textX, textY), scoreColor, scoreFont, "left");
+        // Cooldown shoot panel
+        if (this.players.length > 0) {
+            const player = this.players[0];
+            const cooldownTime = player.getShootingCoolDownTime();
+            const maxCooldown = 2;
+            const iconSize = 40;
+            const iconPosition = new Vector2D(scorePanelPosition.x, scorePanelPosition.y + scorePanelHeight + panelPadding);
+            this.canvas.drawRect(iconPosition, iconSize, iconSize, "dimgray");
+            if (cooldownTime > 0) {
+                const cooldownFillHeight = (cooldownTime / maxCooldown) * iconSize;
+                this.canvas.drawRect(new Vector2D(iconPosition.x, iconPosition.y + (iconSize - cooldownFillHeight)), iconSize, cooldownFillHeight, "rgba(50, 50, 50, 0.85)");
+            }
+            else {
+                this.canvas.drawRect(iconPosition, iconSize, iconSize, "lightgreen");
+                this.canvas.drawText("R", new Vector2D(iconPosition.x + iconSize / 2, iconPosition.y + iconSize / 2 + 7), "black", "bold 20px Arial", "center");
+            }
+            this.canvas.drawStroke(iconPosition, iconSize, iconSize, "white");
+            this.canvas.drawText(cooldownTime > 0 ? cooldownTime.toFixed(1) + "s" : "Ready", new Vector2D(iconPosition.x + iconSize + panelPadding / 2, iconPosition.y + iconSize / 2 + 6), cooldownTime > 0 ? "yellow" : "lightgreen", "16px 'Segoe UI', Arial", "left");
+        }
+        const copyrightText = "Made by ikniz Nguyễn Mỹ Thống";
+        const copyrightFont = "12px 'Segoe UI', Arial, sans-serif";
+        const copyrightColor = "rgba(255, 255, 255, 0.5)";
+        const copyrightX = this.canvas.getWidth() - panelPadding;
+        const copyrightY = this.canvas.getHeight() - panelPadding;
+        this.canvas.drawText(copyrightText, new Vector2D(copyrightX, copyrightY), copyrightColor, copyrightFont, "right");
+    }
     //   ____    _    __  __ _____   _     ___   ___  ____
     //  / ___|  / \  |  \/  | ____| | |   / _ \ / _ \|  _ \
     // | |  _  / _ \ | |\/| |  _|   | |  | | | | | | | |_) |
@@ -388,11 +481,13 @@ class Game {
     //  \____/_/   \_\_|  |_|_____| |_____\___/ \___/|_|
     gameLoop(currentTime) {
         if (this.gameOver) {
+            this.canvas.drawRect(new Vector2D(0, 0), this.canvas.getWidth(), this.canvas.getHeight(), "rgba(0, 0, 0, 0.8)");
             const centerX = this.canvas.getWidth() / 2;
             const centerY = this.canvas.getHeight() / 2;
-            this.canvas.drawText("Game Over", new Vector2D(centerX - 70, centerY - 40), "red");
-            this.canvas.drawText("Click to Restart", new Vector2D(centerX - 90, centerY), "white");
-            this.canvas.drawText("Score: " + this.score, new Vector2D(centerX - 55, centerY + 40), "yellow");
+            this.canvas.drawText("Game Over", new Vector2D(centerX, centerY - 80), "#E74C3C", "bold 72px 'Impact', 'Arial Black', sans-serif", "center");
+            this.canvas.drawText("Final Score: " + this.score, new Vector2D(centerX, centerY), "#FFFFFF", "36px 'Segoe UI', Arial, sans-serif", "center");
+            this.canvas.drawText("Click anywhere to Restart", new Vector2D(centerX, centerY + 60), "#DDDDDD", "24px 'Segoe UI', Arial, sans-serif", "center");
+            this.canvas.drawText("Made by ikniz Nguyễn Mỹ Thống", new Vector2D(centerX, centerY + 100), "#AAAAAA", "16px 'Segoe UI', Arial, sans-serif", "center");
             return;
         }
         const deltaTime = Math.min((currentTime - this.lastTime) / 1000, 0.1);
@@ -406,30 +501,46 @@ class Game {
             const healthBarPos = new Vector2D(player.getPosition().x, player.getPosition().y - 8);
             this.canvas.drawRect(healthBarPos, (player.getWidth() * player.getCurrentHP()) / player.getMaxHP(), 4, "red");
             this.canvas.drawStroke(healthBarPos, (player.getWidth() * player.getCurrentHP()) / player.getMaxHP(), 5, "white");
+            // Draw short raycast line to mouse
+            if (this.mousePosition) {
+                const playerCenter = new Vector2D(player.getPosition().x + player.getWidth() / 2, player.getPosition().y + player.getHeight() / 2);
+                const directionToMouse = this.mousePosition
+                    .add(playerCenter.multiply(-1))
+                    .normalize();
+                const raycastLength = 100;
+                const raycastEndPoint = playerCenter.add(directionToMouse.multiply(raycastLength));
+                this.canvas.drawLine(playerCenter, raycastEndPoint, "red", 2);
+            }
+            if (player.getCurrentHP() <= 0) {
+                this.gameOver = true;
+            }
             if (player.getCurrentHP() <= 0) {
                 this.gameOver = true;
             }
         });
         // Draw bullets
         this.bullets.forEach((bullet) => {
-            if (bullet.getCollideTime() <= 5) {
+            if (bullet.getWallCollideTime() <= 5) {
                 bullet.update(deltaTime, this.canvas.getWidth(), this.canvas.getHeight());
-                this.canvas.drawCircle(bullet.getPosition(), bullet.getRadius(), "white");
+                // Draw bullet
+                this.canvas.drawCircle(bullet.getPosition(), bullet.getRadius(), bullet.getWallCollideTime() >= 1 ? "red" : "white");
                 // Check collision with players
                 this.players.forEach((player) => {
                     if (this.checkCollisionBullet(bullet, player)) {
-                        player.reduceHP(2);
-                        this.deleteBullet(bullet);
+                        if (bullet.getWallCollideTime() >= 1) {
+                            player.reduceHP(2);
+                            this.deleteBullet(bullet);
+                        }
                     }
                 });
                 // Check collision with enemies
                 this.enemies.forEach((enemy) => {
-                    //
                     if (this.checkCollisionBullet(bullet, enemy)) {
-                        enemy.reduceHP(2);
-                        this.deleteBullet(bullet);
-                        this.deleteEnemy(enemy);
-                        this.score += 1;
+                        if (bullet.getWallCollideTime() >= 1) {
+                            this.deleteBullet(bullet);
+                            this.deleteEnemy(enemy);
+                            this.score += 1;
+                        }
                     }
                 });
             }
@@ -452,8 +563,12 @@ class Game {
                 });
             }
         });
-        // display score
-        this.canvas.drawText("Score: " + this.score.toString(), new Vector2D(20, 20), "yellow");
+        this.drawUI();
+        // Reduce player cooldown time for each frame
+        if (this.players.length > 0 &&
+            this.players[0].getShootingCoolDownTime() > 0) {
+            this.players[0].reduceShootingCoolDownTime(deltaTime);
+        }
         requestAnimationFrame((time) => this.gameLoop(time));
     }
     startGame() {
@@ -466,7 +581,7 @@ class Game {
         this.bullets = [];
         this.score = 0;
         this.gameOver = false;
-        const spawnPosition = new Vector2D(80, 80);
+        const spawnPosition = new Vector2D(120, 120);
         const firstPlayer = new Player(spawnPosition);
         this.addPlayer(firstPlayer);
         this.startGame();
@@ -475,7 +590,7 @@ class Game {
 // Initialize game
 document.addEventListener("DOMContentLoaded", () => {
     const game = new Game();
-    const spawnPosition = new Vector2D(80, 80);
+    const spawnPosition = new Vector2D(120, 120);
     const firstPlayer = new Player(spawnPosition);
     game.addPlayer(firstPlayer);
     game.startGame();

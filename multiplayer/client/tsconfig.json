@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "es2015", // Your chosen ES version
+    "module": "es2015", // Your chosen module system (ES6 modules)
+    "lib": ["es2015", "dom"], // Crucial: Add "dom" for browser APIs like WebSocket, document, etc.
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "moduleResolution": "node", // Helps TypeScript resolve modules from node_modules
+    "esModuleInterop": true, // Enables compatibility with CommonJS modules
+    "skipLibCheck": true, // Skips type checking of declaration files in node_modules
+    "forceConsistentCasingInFileNames": true // Good practice
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules"] // Good practice, though often default
+}

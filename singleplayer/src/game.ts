@@ -44,22 +44,10 @@ class Canvas {
     this.ctx = context;
 
     // Set initial dimensions to window size
-    this.width = window.innerWidth;
-    this.height = window.innerHeight;
+    this.width = 1300;
+    this.height = 650;
     this.canvas.width = this.width;
     this.canvas.height = this.height;
-
-    // Add event listener for window resize
-    window.addEventListener("resize", this.handleResize.bind(this));
-  }
-
-  private handleResize() {
-    this.width = window.innerWidth;
-    this.height = window.innerHeight;
-    this.canvas.width = this.width;
-    this.canvas.height = this.height;
-    // The game loop calls initCanvas, so it will redraw the background.
-    // If other elements need immediate repositioning, you might add calls here.
   }
 
   initCanvas() {
@@ -150,10 +138,6 @@ class Bullet {
     this.radius = 5;
   }
 
-  getBullet() {
-    return this;
-  }
-
   getPosition() {
     return this.position;
   }
@@ -222,10 +206,6 @@ class Player {
     this.height = 50;
     this.color = "blue";
     this.shootingCoolDownTime = 0;
-  }
-
-  getPlayer() {
-    return this;
   }
 
   getPosition(): Vector2D {
@@ -422,6 +402,7 @@ class Game {
   private score: number;
   private gameOver: boolean;
   private mousePosition: Vector2D | null;
+  private deltaTime: number;
 
   constructor() {
     this.canvas = new Canvas();
@@ -434,9 +415,10 @@ class Game {
     this.score = 0;
     this.gameOver = false;
     this.mousePosition = null;
+    this.deltaTime = 0;
     setInterval(() => {
       this.spawnEnemy();
-    }, 4000);
+    }, 6000);
 
     this.canvas
       .getCanvas()
@@ -681,6 +663,68 @@ class Game {
       "right"
     );
   }
+
+  drawPlayer() {
+    this.players.forEach((player) => {
+      player.update(
+        this.deltaTime,
+        this.canvas.getWidth(),
+        this.canvas.getHeight()
+      );
+      this.canvas.drawRect(
+        player.getPosition(),
+        player.getWidth(),
+        player.getHeight(),
+        player.getColor()
+      );
+      // Draw health bar
+      const healthBarPos = new Vector2D(
+        player.getPosition().x,
+        player.getPosition().y - 8
+      );
+      this.canvas.drawRect(
+        healthBarPos,
+        (player.getWidth() * player.getCurrentHP()) / player.getMaxHP(),
+        4,
+        "red"
+      );
+      this.canvas.drawStroke(
+        healthBarPos,
+        (player.getWidth() * player.getCurrentHP()) / player.getMaxHP(),
+        5,
+        "white"
+      );
+
+      // Draw short raycast line to mouse
+      if (this.mousePosition) {
+        const playerCenter = new Vector2D(
+          player.getPosition().x + player.getWidth() / 2,
+          player.getPosition().y + player.getHeight() / 2
+        );
+        const directionToMouse = this.mousePosition
+          .add(playerCenter.multiply(-1))
+          .normalize();
+        const raycastLength = 50;
+        const raycastEndPoint = playerCenter.add(
+          directionToMouse.multiply(raycastLength)
+        );
+        this.canvas.drawLine(playerCenter, raycastEndPoint, "red", 2);
+      }
+
+      if (player.getCurrentHP() <= 0) {
+        this.gameOver = true;
+      }
+    });
+  }
+
+  reducePlayerCooldown() {
+    if (
+      this.players.length > 0 &&
+      this.players[0].getShootingCoolDownTime() > 0
+    ) {
+      this.players[0].reduceShootingCoolDownTime(this.deltaTime);
+    }
+  }
   //   ____    _    __  __ _____   _     ___   ___  ____
   //  / ___|  / \  |  \/  | ____| | |   / _ \ / _ \|  _ \
   // | |  _  / _ \ | |\/| |  _|   | |  | | | | | | | |_) |
@@ -732,68 +776,18 @@ class Game {
       return;
     }
 
-    const deltaTime = Math.min((currentTime - this.lastTime) / 1000, 0.1);
+    this.deltaTime = Math.min((currentTime - this.lastTime) / 1000, 0.1);
     this.lastTime = currentTime;
 
     this.canvas.initCanvas();
 
-    // Draw players
-    this.players.forEach((player) => {
-      player.update(deltaTime, this.canvas.getWidth(), this.canvas.getHeight());
-      this.canvas.drawRect(
-        player.getPosition(),
-        player.getWidth(),
-        player.getHeight(),
-        player.getColor()
-      );
-      // Draw health bar
-      const healthBarPos = new Vector2D(
-        player.getPosition().x,
-        player.getPosition().y - 8
-      );
-      this.canvas.drawRect(
-        healthBarPos,
-        (player.getWidth() * player.getCurrentHP()) / player.getMaxHP(),
-        4,
-        "red"
-      );
-      this.canvas.drawStroke(
-        healthBarPos,
-        (player.getWidth() * player.getCurrentHP()) / player.getMaxHP(),
-        5,
-        "white"
-      );
-
-      // Draw short raycast line to mouse
-      if (this.mousePosition) {
-        const playerCenter = new Vector2D(
-          player.getPosition().x + player.getWidth() / 2,
-          player.getPosition().y + player.getHeight() / 2
-        );
-        const directionToMouse = this.mousePosition
-          .add(playerCenter.multiply(-1))
-          .normalize();
-        const raycastLength = 100;
-        const raycastEndPoint = playerCenter.add(
-          directionToMouse.multiply(raycastLength)
-        );
-        this.canvas.drawLine(playerCenter, raycastEndPoint, "red", 2);
-      }
-
-      if (player.getCurrentHP() <= 0) {
-        this.gameOver = true;
-      }
-
-      if (player.getCurrentHP() <= 0) {
-        this.gameOver = true;
-      }
-    });
+    this.drawPlayer();
 
     // Draw bullets
     this.bullets.forEach((bullet) => {
       if (bullet.getWallCollideTime() <= 5) {
         bullet.update(
-          deltaTime,
+          this.deltaTime,
           this.canvas.getWidth(),
           this.canvas.getHeight()
         );
@@ -852,12 +846,7 @@ class Game {
     this.drawUI();
 
     // Reduce player cooldown time for each frame
-    if (
-      this.players.length > 0 &&
-      this.players[0].getShootingCoolDownTime() > 0
-    ) {
-      this.players[0].reduceShootingCoolDownTime(deltaTime);
-    }
+    this.reducePlayerCooldown();
 
     requestAnimationFrame((time) => this.gameLoop(time));
   }

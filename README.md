@@ -1,5 +1,3 @@
-### This project is a single player shooter game. I am considering making it multiplayer.
+### This project is a single/multiplayer shooter game
 
-### Server for this game will be created in the future.
-
-### Demo: https://shooter-game-nine.vercel.app/
+### Demo for singleplayer: https://shooter-game-nine.vercel.app/

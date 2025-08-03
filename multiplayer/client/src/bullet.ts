@@ -5,8 +5,8 @@ export interface BulletState {
   ownerId: string;
   x: number;
   y: number;
-  dirX: number; // Not strictly needed for client rendering if only position matters
-  dirY: number; // Not strictly needed
+  dirX: number;
+  dirY: number;
   radius: number;
   timesCollidedWall: number;
 }

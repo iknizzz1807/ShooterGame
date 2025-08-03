@@ -6,22 +6,33 @@ export class Game {
     constructor() {
         this.ws = null;
         this.myPlayerId = null;
+        // --- STATE MANAGEMENT ---
+        this.clientState = "connecting";
+        this.roomState = "waiting"; // The state of the game *inside* a room
+        this.winnerId = null;
+        this.amIReady = false;
+        // --- DATA STORAGE ---
         this.players = new Map();
         this.bullets = new Map();
+        this.rooms = [];
+        // --- INPUT & UI ---
         this.keysPressed = {};
         this.mousePosition = null;
-        // private lastTime: number = 0; // deltaTime handled by server, client just renders
-        this.gameOver = false; // This concept might change for PvP
+        this.roomListClickableAreas = {};
+        this.createRoomButtonArea = null;
+        this.leaveRoomButtonArea = null;
         this.canvas = new Canvas();
         this.connectWebSocket();
         this.setupInputHandlers();
     }
+    // --- NETWORK LOGIC ---
     connectWebSocket() {
         const serverHost = "localhost:8080";
         const wsUrl = `ws://${serverHost}/ws`;
         this.ws = new WebSocket(wsUrl);
         this.ws.onopen = () => {
-            console.log("Connected to game server.");
+            console.log("Connected to game server hub.");
+            this.clientState = "lobby"; // Initial state after connection is the lobby
         };
         this.ws.onmessage = (event) => {
             try {
@@ -34,14 +45,12 @@ export class Game {
         };
         this.ws.onerror = (error) => {
             console.error("WebSocket error:", error);
+            this.clientState = "disconnected";
         };
         this.ws.onclose = () => {
             console.log("Disconnected from game server.");
             this.myPlayerId = null;
-            this.players.clear();
-            this.bullets.clear();
-            // Optionally, try to reconnect or show a "disconnected" message
-            this.gameOver = true; // Or handle reconnection UI
+            this.clientState = "disconnected";
         };
     }
     handleServerMessage(msg) {
@@ -49,52 +58,54 @@ export class Game {
             case "welcome":
                 this.myPlayerId = msg.payload.playerId;
                 console.log("Received welcome. My player ID:", this.myPlayerId);
-                // Initial game state might be part of welcome or a separate gameState message
+                break;
+            case "room_list":
+                this.clientState = "lobby";
+                this.rooms = msg.payload || [];
+                // Clear old game data when returning to lobby
+                this.players.clear();
+                this.bullets.clear();
+                console.log("Received room list:", this.rooms);
                 break;
             case "gameState":
+                this.clientState = "in_game";
                 const statePayload = msg.payload;
-                // Update or add players
-                const receivedPlayerIds = new Set();
-                if (statePayload.players) {
-                    for (const id in statePayload.players) {
-                        const pState = statePayload.players[id];
-                        receivedPlayerIds.add(id);
-                        if (this.players.has(id)) {
-                            this.players.get(id).updateState(pState);
-                        }
-                        else {
-                            this.players.set(id, new Player(pState));
-                        }
-                    }
-                }
-                // Remove players that are no longer in the server state
-                this.players.forEach((player, id) => {
-                    if (!receivedPlayerIds.has(id)) {
+                this.roomState = statePayload.state;
+                this.winnerId = statePayload.winnerId;
+                this.amIReady = this.myPlayerId
+                    ? statePayload.readyPlayers[this.myPlayerId] || false
+                    : false;
+                // Update players
+                const receivedPlayerIds = new Set(Object.keys(statePayload.players || {}));
+                this.players.forEach((_, id) => {
+                    if (!receivedPlayerIds.has(id))
                         this.players.delete(id);
+                });
+                receivedPlayerIds.forEach((id) => {
+                    const pState = statePayload.players[id];
+                    if (this.players.has(id)) {
+                        this.players.get(id).updateState(pState);
+                    }
+                    else {
+                        this.players.set(id, new Player(pState));
                     }
                 });
-                // Update or add bullets
-                const receivedBulletIds = new Set();
-                if (statePayload.bullets) {
-                    for (const id in statePayload.bullets) {
-                        const bState = statePayload.bullets[id];
-                        receivedBulletIds.add(id);
-                        if (this.bullets.has(id)) {
-                            this.bullets.get(id).updateState(bState);
-                        }
-                        else {
-                            this.bullets.set(id, new Bullet(bState));
-                        }
-                    }
-                }
-                // Remove bullets no longer in server state
-                this.bullets.forEach((bullet, id) => {
-                    if (!receivedBulletIds.has(id)) {
+                // Update bullets
+                const receivedBulletIds = new Set(Object.keys(statePayload.bullets || {}));
+                this.bullets.forEach((_, id) => {
+                    if (!receivedBulletIds.has(id))
                         this.bullets.delete(id);
+                });
+                receivedBulletIds.forEach((id) => {
+                    const bState = statePayload.bullets[id];
+                    if (this.bullets.has(id)) {
+                        this.bullets.get(id).updateState(bState);
+                    }
+                    else {
+                        this.bullets.set(id, new Bullet(bState));
                     }
                 });
                 break;
-            // Add other message types if needed (e.g., playerDied, scoreUpdate)
             default:
                 console.log("Unknown message type from server:", msg.type);
         }
@@ -104,15 +115,20 @@ export class Game {
             this.ws.send(JSON.stringify({ type, payload }));
         }
     }
+    // --- INPUT HANDLING ---
     setupInputHandlers() {
         var _a, _b;
         window.addEventListener("keydown", (event) => {
-            this.keysPressed[event.key.toLowerCase()] = true;
-            this.updatePlayerInput();
+            if (this.clientState === "in_game") {
+                this.keysPressed[event.key.toLowerCase()] = true;
+                this.updatePlayerInput();
+            }
         });
         window.addEventListener("keyup", (event) => {
-            this.keysPressed[event.key.toLowerCase()] = false;
-            this.updatePlayerInput();
+            if (this.clientState === "in_game") {
+                this.keysPressed[event.key.toLowerCase()] = false;
+                this.updatePlayerInput();
+            }
         });
         (_a = this.canvas
             .getCanvas()) === null || _a === void 0 ? void 0 : _a.addEventListener("mousemove", (event) => {
@@ -120,25 +136,76 @@ export class Game {
             this.mousePosition = new Vector2D(event.clientX - canvasRect.left, event.clientY - canvasRect.top);
         });
         (_b = this.canvas.getCanvas()) === null || _b === void 0 ? void 0 : _b.addEventListener("click", (event) => {
-            if (this.gameOver) {
-                // Simple restart logic for client if needed, server handles actual rejoin
-                // this.restartGame(); // This would need server interaction
-                return;
-            }
-            if (!this.myPlayerId || !this.mousePosition)
-                return;
-            const me = this.players.get(this.myPlayerId);
-            if (me && me.getShootingCoolDownTime() <= 0) {
-                // Client-side check for immediate feedback
-                this.sendWsMessage("shoot", {
-                    x: this.mousePosition.x,
-                    y: this.mousePosition.y,
-                });
+            const canvasRect = this.canvas.getCanvas().getBoundingClientRect();
+            const clickPos = new Vector2D(event.clientX - canvasRect.left, event.clientY - canvasRect.top);
+            switch (this.clientState) {
+                case "lobby":
+                    this.handleLobbyClick(clickPos);
+                    break;
+                case "in_game":
+                    this.handleInGameClick(clickPos);
+                    break;
             }
         });
     }
+    handleLobbyClick(clickPos) {
+        // Check "Create Room" button
+        if (this.createRoomButtonArea &&
+            this.isClickInArea(clickPos, this.createRoomButtonArea)) {
+            console.log("Sending create_room message.");
+            this.sendWsMessage("create_room", {});
+            return;
+        }
+        // Check "Join Room" buttons
+        for (const roomId in this.roomListClickableAreas) {
+            if (this.isClickInArea(clickPos, this.roomListClickableAreas[roomId])) {
+                console.log(`Sending join_room message for room ${roomId}.`);
+                this.sendWsMessage("join_room", { roomId });
+                return;
+            }
+        }
+    }
+    handleInGameClick(clickPos) {
+        // Check "Leave Room" button first
+        if (this.leaveRoomButtonArea &&
+            this.isClickInArea(clickPos, this.leaveRoomButtonArea)) {
+            console.log("Sending leave_room message.");
+            this.sendWsMessage("leave_room", {});
+            return; // The server will send a 'room_list' which will change our state back to lobby
+        }
+        // Logic depends on the state *within* the game room
+        switch (this.roomState) {
+            case "waiting":
+                if (!this.amIReady) {
+                    console.log("Sending ready message to server.");
+                    this.sendWsMessage("ready", {});
+                }
+                break;
+            case "in_progress":
+                if (!this.myPlayerId || !this.mousePosition)
+                    return;
+                const me = this.players.get(this.myPlayerId);
+                if (me && me.getShootingCoolDownTime() <= 0) {
+                    this.sendWsMessage("shoot", {
+                        x: this.mousePosition.x,
+                        y: this.mousePosition.y,
+                    });
+                }
+                break;
+            case "game_over":
+                console.log("Sending restart message to server.");
+                this.sendWsMessage("restart", {});
+                break;
+        }
+    }
+    isClickInArea(clickPos, area) {
+        return (clickPos.x >= area.x &&
+            clickPos.x <= area.x + area.width &&
+            clickPos.y >= area.y &&
+            clickPos.y <= area.y + area.height);
+    }
     updatePlayerInput() {
-        if (!this.myPlayerId)
+        if (!this.myPlayerId || this.clientState !== "in_game")
             return;
         let x = 0;
         let y = 0;
@@ -150,92 +217,190 @@ export class Game {
             x -= 1;
         if (this.keysPressed["d"])
             x += 1;
-        // Normalize if necessary (server also does this for safety)
         const inputVec = new Vector2D(x, y);
         const normalizedInput = inputVec.magnitude() > 0 ? inputVec.normalize() : inputVec;
         this.sendWsMessage("input", { x: normalizedInput.x, y: normalizedInput.y });
     }
-    drawUI() {
+    // --- DRAWING LOGIC ---
+    drawLobby() {
+        const centerX = this.canvas.getWidth() / 2;
+        // Clear previous clickable areas
+        this.roomListClickableAreas = {};
+        // Title
+        this.canvas.drawText("Game Lobby", new Vector2D(centerX, 80), "white", "bold 48px Arial", "center");
+        // Create Room Button
+        const createBtnWidth = 250;
+        const createBtnHeight = 50;
+        const createBtnPos = new Vector2D(centerX - createBtnWidth / 2, 120);
+        this.createRoomButtonArea = {
+            x: createBtnPos.x,
+            y: createBtnPos.y,
+            width: createBtnWidth,
+            height: createBtnHeight,
+        };
+        this.canvas.drawRect(createBtnPos, createBtnWidth, createBtnHeight, "#2a9d8f");
+        this.canvas.drawText("Create New Room", new Vector2D(centerX, createBtnPos.y + 35), "white", "24px Arial", "center");
+        // Room List
+        let yOffset = 220;
+        const roomHeight = 60;
+        const roomWidth = 600;
+        const roomStartX = centerX - roomWidth / 2;
+        if (this.rooms.length === 0) {
+            this.canvas.drawText("No rooms available. Create one!", new Vector2D(centerX, yOffset + 30), "lightgray", "20px Arial", "center");
+        }
+        this.rooms.forEach((room) => {
+            // Room background
+            this.canvas.drawRect(new Vector2D(roomStartX, yOffset), roomWidth, roomHeight, "#333");
+            this.canvas.drawStroke(new Vector2D(roomStartX, yOffset), roomWidth, roomHeight, "#555");
+            // Room info text
+            const roomInfoText = `${room.name}  -  Players: ${room.playerCount}/${room.maxPlayers}`;
+            this.canvas.drawText(roomInfoText, new Vector2D(roomStartX + 20, yOffset + 38), "white", "20px Arial", "left");
+            // Join button
+            if (room.playerCount < room.maxPlayers) {
+                const joinBtnWidth = 100;
+                const joinBtnHeight = 40;
+                const joinBtnPos = new Vector2D(roomStartX + roomWidth - joinBtnWidth - 10, yOffset + 10);
+                this.roomListClickableAreas[room.id] = {
+                    x: joinBtnPos.x,
+                    y: joinBtnPos.y,
+                    width: joinBtnWidth,
+                    height: joinBtnHeight,
+                };
+                this.canvas.drawRect(joinBtnPos, joinBtnWidth, joinBtnHeight, "#e9c46a");
+                this.canvas.drawText("Join", new Vector2D(joinBtnPos.x + joinBtnWidth / 2, joinBtnPos.y + 28), "black", "bold 20px Arial", "center");
+            }
+            else {
+                this.canvas.drawText("Full", new Vector2D(roomStartX + roomWidth - 55, yOffset + 38), "red", "bold 20px Arial", "center");
+            }
+            yOffset += roomHeight + 15;
+        });
+    }
+    drawInGameUI() {
         if (!this.myPlayerId)
             return;
         const me = this.players.get(this.myPlayerId);
         if (!me)
             return;
-        // Score / Player Info (Example)
+        // --- Leave Room Button ---
+        const leaveBtnWidth = 120;
+        const leaveBtnHeight = 30;
+        const leaveBtnPos = new Vector2D(this.canvas.getWidth() - leaveBtnWidth - 15, 15);
+        this.leaveRoomButtonArea = {
+            x: leaveBtnPos.x,
+            y: leaveBtnPos.y,
+            width: leaveBtnWidth,
+            height: leaveBtnHeight,
+        };
+        this.canvas.drawRect(leaveBtnPos, leaveBtnWidth, leaveBtnHeight, "#e76f51");
+        this.canvas.drawText("Back to Lobby", new Vector2D(leaveBtnPos.x + leaveBtnWidth / 2, leaveBtnPos.y + 21), "white", "16px Arial", "center");
+        // --- HP Info ---
         const panelPadding = 10;
-        const scorePanelPosition = new Vector2D(15, 15);
-        const scorePanelHeight = 30;
-        // My HP
-        this.canvas.drawText(`HP: ${me.getCurrentHP()}/${me.getMaxHP()}`, new Vector2D(scorePanelPosition.x, scorePanelPosition.y + scorePanelHeight / 2 + 7), "white", "bold 18px Arial");
-        // Cooldown shoot panel
+        const infoPanelPos = new Vector2D(15, 15);
+        this.canvas.drawText(`HP: ${me.getCurrentHP()}/${me.getMaxHP()}`, new Vector2D(infoPanelPos.x, infoPanelPos.y + 15), "white", "bold 18px Arial");
+        // --- Cooldown Panel ---
         const cooldownTime = me.getShootingCoolDownTime();
-        const maxCooldown = 2; // Should match server PlayerShootCooldown
+        const maxCooldown = 2; // Should match server
         const iconSize = 40;
-        const iconPosition = new Vector2D(scorePanelPosition.x, scorePanelPosition.y + scorePanelHeight + panelPadding);
-        this.canvas.drawRect(iconPosition, iconSize, iconSize, "dimgray");
+        const iconPos = new Vector2D(infoPanelPos.x, infoPanelPos.y + 25);
+        this.canvas.drawRect(iconPos, iconSize, iconSize, "dimgray");
         if (cooldownTime > 0) {
-            const cooldownFillHeight = (cooldownTime / maxCooldown) * iconSize;
-            this.canvas.drawRect(new Vector2D(iconPosition.x, iconPosition.y + (iconSize - cooldownFillHeight)), iconSize, cooldownFillHeight, "rgba(50, 50, 50, 0.85)");
+            const fillHeight = (cooldownTime / maxCooldown) * iconSize;
+            this.canvas.drawRect(new Vector2D(iconPos.x, iconPos.y + (iconSize - fillHeight)), iconSize, fillHeight, "rgba(50, 50, 50, 0.85)");
         }
         else {
-            this.canvas.drawRect(iconPosition, iconSize, iconSize, "lightgreen");
-            this.canvas.drawText("R", // Ready
-            new Vector2D(iconPosition.x + iconSize / 2, iconPosition.y + iconSize / 2 + 7), "black", "bold 20px Arial", "center");
+            this.canvas.drawRect(iconPos, iconSize, iconSize, "lightgreen");
+            this.canvas.drawText("R", new Vector2D(iconPos.x + iconSize / 2, iconPos.y + iconSize / 2 + 7), "black", "bold 20px Arial", "center");
         }
-        this.canvas.drawStroke(iconPosition, iconSize, iconSize, "white");
-        this.canvas.drawText(cooldownTime > 0 ? cooldownTime.toFixed(1) + "s" : "Ready", new Vector2D(iconPosition.x + iconSize + panelPadding / 2, iconPosition.y + iconSize / 2 + 6), cooldownTime > 0 ? "yellow" : "lightgreen", "16px 'Segoe UI', Arial", "left");
-        const copyrightText = "Multiplayer Shooter - ikniz";
-        this.canvas.drawText(copyrightText, new Vector2D(this.canvas.getWidth() - panelPadding, this.canvas.getHeight() - panelPadding), "rgba(255, 255, 255, 0.5)", "12px Arial", "right");
+        this.canvas.drawStroke(iconPos, iconSize, iconSize, "white");
+        this.canvas.drawText(cooldownTime > 0 ? cooldownTime.toFixed(1) + "s" : "Ready", new Vector2D(iconPos.x + iconSize + panelPadding / 2, iconPos.y + iconSize / 2 + 6), cooldownTime > 0 ? "yellow" : "lightgreen", "16px 'Segoe UI', Arial", "left");
     }
     drawPlayers() {
         this.players.forEach((player) => {
-            this.canvas.drawRect(player.getPosition(), player.getWidth(), player.getHeight(), player.getColor());
-            // Draw health bar
-            const healthBarPos = new Vector2D(player.getPosition().x, player.getPosition().y - 10 // Above player
-            );
+            const color = player.id === this.myPlayerId ? "gold" : player.getColor();
+            this.canvas.drawRect(player.getPosition(), player.getWidth(), player.getHeight(), color);
+            // "YOU" text
+            if (player.id === this.myPlayerId) {
+                this.canvas.drawText("YOU", new Vector2D(player.getPosition().x + player.getWidth() / 2, player.getPosition().y - 30), "gold", "bold 14px Arial", "center");
+            }
+            // Health bar
+            const healthBarPos = new Vector2D(player.getPosition().x, player.getPosition().y - 10);
             const healthBarMaxWidth = player.getWidth();
             const currentHealthWidth = (player.getCurrentHP() / player.getMaxHP()) * healthBarMaxWidth;
-            this.canvas.drawRect(healthBarPos, healthBarMaxWidth, 5, "#555"); // Background
+            this.canvas.drawRect(healthBarPos, healthBarMaxWidth, 5, "#555");
             this.canvas.drawRect(healthBarPos, currentHealthWidth, 5, "red");
             this.canvas.drawStroke(healthBarPos, healthBarMaxWidth, 5, "white");
-            // Draw player ID (or name if you add that feature)
-            this.canvas.drawText(player.id.substring(0, 6), // Short ID
-            new Vector2D(player.getPosition().x + player.getWidth() / 2, player.getPosition().y - 15), "white", "12px Arial", "center");
-            // Draw short raycast line to mouse for current player
+            // Player ID
+            this.canvas.drawText(player.id.substring(0, 6), new Vector2D(player.getPosition().x + player.getWidth() / 2, player.getPosition().y - 15), "white", "12px Arial", "center");
+            // Aiming line
             if (player.id === this.myPlayerId && this.mousePosition) {
-                const playerCenter = new Vector2D(player.getPosition().x + player.getWidth() / 2, player.getPosition().y + player.getHeight() / 2);
+                const playerCenter = player
+                    .getPosition()
+                    .add(new Vector2D(player.getWidth() / 2, player.getHeight() / 2));
                 const directionToMouse = this.mousePosition
                     .add(playerCenter.multiply(-1))
                     .normalize();
-                const raycastLength = 50;
-                const raycastEndPoint = playerCenter.add(directionToMouse.multiply(raycastLength));
+                const raycastEndPoint = playerCenter.add(directionToMouse.multiply(50));
                 this.canvas.drawLine(playerCenter, raycastEndPoint, "rgba(255,0,0,0.5)", 2);
             }
         });
     }
     drawBullets() {
-        if (this.bullets.size > 0) {
-            console.log(`Drawing ${this.bullets.size} bullets. First bullet:`, this.bullets.values().next().value);
-        }
         this.bullets.forEach((bullet) => {
-            this.canvas.drawCircle(bullet.getPosition(), bullet.getRadius(), bullet.getWallCollideTime() >= 1 ? "red" : "white" // Red if it can damage
-            );
+            this.canvas.drawCircle(bullet.getPosition(), bullet.getRadius(), bullet.getWallCollideTime() >= 1 ? "red" : "white");
         });
     }
+    drawInGameContent() {
+        switch (this.roomState) {
+            case "waiting":
+                this.drawPlayers();
+                this.canvas.drawText(this.players.size < 2
+                    ? "Waiting for player..."
+                    : this.amIReady
+                        ? "Waiting for opponent..."
+                        : "Click to Ready", new Vector2D(this.canvas.getWidth() / 2, this.canvas.getHeight() / 2), "white", "30px Arial", "center");
+                this.drawInGameUI();
+                break;
+            case "in_progress":
+                this.drawPlayers();
+                this.drawBullets();
+                this.drawInGameUI();
+                break;
+            case "game_over":
+                this.drawPlayers();
+                const winner = this.players.get(this.winnerId);
+                const winnerText = (winner === null || winner === void 0 ? void 0 : winner.id) === this.myPlayerId ? "YOU WIN!" : `YOU LOSE!`;
+                const centerX = this.canvas.getWidth() / 2;
+                const centerY = this.canvas.getHeight() / 2;
+                this.canvas.drawText("GAME OVER", new Vector2D(centerX, centerY - 40), "red", "50px Arial", "center");
+                this.canvas.drawText(winnerText, new Vector2D(centerX, centerY + 10), "white", "30px Arial", "center");
+                this.canvas.drawText("Click to Ready for Rematch", new Vector2D(centerX, centerY + 60), "lightgray", "20px Arial", "center");
+                this.drawInGameUI();
+                break;
+        }
+    }
+    // --- MAIN GAME LOOP ---
     gameLoop() {
-        // this.deltaTime = Math.min((currentTime - this.lastTime) / 1000, 0.1); // Not needed for client logic
-        // this.lastTime = currentTime;
-        this.canvas.initCanvas(); // Clear screen
-        this.drawPlayers();
-        this.drawBullets();
-        this.drawUI();
-        if (this.gameOver) {
-            this.canvas.drawText("Disconnected or Game Over", new Vector2D(this.canvas.getWidth() / 2, this.canvas.getHeight() / 2), "white", "30px Arial", "center");
+        this.canvas.initCanvas();
+        const centerX = this.canvas.getWidth() / 2;
+        const centerY = this.canvas.getHeight() / 2;
+        switch (this.clientState) {
+            case "connecting":
+                this.canvas.drawText("Connecting to server...", new Vector2D(centerX, centerY), "white", "30px Arial", "center");
+                break;
+            case "lobby":
+                this.drawLobby();
+                break;
+            case "in_game":
+                this.drawInGameContent();
+                break;
+            case "disconnected":
+                this.canvas.drawText("Disconnected from server", new Vector2D(centerX, centerY), "white", "30px Arial", "center");
+                this.canvas.drawText("Please refresh the page to reconnect.", new Vector2D(centerX, centerY + 40), "lightgray", "20px Arial", "center");
+                break;
         }
         requestAnimationFrame(() => this.gameLoop());
     }
     startGame() {
-        // this.lastTime = performance.now(); // Not needed for client logic
         requestAnimationFrame(() => this.gameLoop());
     }
 }

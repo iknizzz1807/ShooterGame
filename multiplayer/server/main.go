@@ -11,11 +11,11 @@ var addr = flag.String("addr", ":8080", "http service address")
 func main() {
 	flag.Parse()
 
-	gameManager := NewGameManager()
-	go gameManager.Run()
+	hub := NewHub()
+	go hub.Run()
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		serveWs(gameManager, w, r)
+		serveWs(hub, w, r)
 	})
 
 	log.Println("Server starting on", *addr)

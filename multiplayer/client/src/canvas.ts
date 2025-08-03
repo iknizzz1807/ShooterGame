@@ -1,4 +1,3 @@
-// Your existing Canvas class, make sure it's exportable
 import { Vector2D } from "./vector2d.js";
 
 export class Canvas {

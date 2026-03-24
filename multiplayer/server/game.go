@@ -66,6 +66,7 @@ type Bullet struct {
 }
 
 type GameState struct {
+	RoomID              string             `json:"roomId"`
 	Players             map[string]*Player `json:"players"`
 	Bullets             map[string]*Bullet `json:"bullets"`
 	State               string             `json:"state"`
@@ -473,6 +474,7 @@ func (gr *GameRoom) broadcastGameState() {
 	// Hold lock only long enough to copy state — never while sending
 	gr.RLock()
 	currentGameState := GameState{
+		RoomID:           gr.ID,
 		Players:          make(map[string]*Player, len(gr.players)),
 		Bullets:          make(map[string]*Bullet),
 		State:            gr.State,

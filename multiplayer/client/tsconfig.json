@@ -6,7 +6,8 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "strict": true,
-    "moduleResolution": "node", // Helps TypeScript resolve modules from node_modules
+    "moduleResolution": "node10", // Helps TypeScript resolve modules from node_modules
+    "ignoreDeprecations": "6.0",
     "esModuleInterop": true, // Enables compatibility with CommonJS modules
     "skipLibCheck": true, // Skips type checking of declaration files in node_modules
     "forceConsistentCasingInFileNames": true // Good practice

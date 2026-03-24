@@ -22,7 +22,9 @@ const (
 	BulletSpeed         = 1000.0
 	CanvasWidth         = 1300.0
 	CanvasHeight        = 650.0
-	GameTickRate        = time.Second / 60
+	GameTickRate        = time.Second / 60   // physics tick: 60fps during in_progress
+	IdleTickRate        = time.Second / 5    // heartbeat: 5fps during waiting/game_over
+	RoundDuration       = 180.0             // seconds
 )
 
 // Game Room constants
@@ -64,11 +66,13 @@ type Bullet struct {
 }
 
 type GameState struct {
-	Players      map[string]*Player `json:"players"`
-	Bullets      map[string]*Bullet `json:"bullets"`
-	State        string             `json:"state"`
-	WinnerID     string             `json:"winnerId"`
-	ReadyPlayers map[string]bool    `json:"readyPlayers"`
+	Players             map[string]*Player `json:"players"`
+	Bullets             map[string]*Bullet `json:"bullets"`
+	State               string             `json:"state"`
+	WinnerID            string             `json:"winnerId"`
+	ReadyPlayers        map[string]bool    `json:"readyPlayers"`
+	TimeRemaining       float64            `json:"timeRemaining"`
+	ShootCooldownMax    float64            `json:"shootCooldownMax"`
 }
 
 type GameRoom struct {
@@ -86,9 +90,10 @@ type GameRoom struct {
 	playerReadyChan   chan string
 	playerRestartChan chan string
 
-	State        string `json:"state"`
-	WinnerID     string `json:"winnerId"`
-	readyPlayers map[string]bool
+	State         string `json:"state"`
+	WinnerID      string `json:"winnerId"`
+	readyPlayers  map[string]bool
+	timeRemaining float64 // seconds remaining in current round
 }
 
 type PlayerInputAction struct {
@@ -116,20 +121,20 @@ func NewGameRoom(id string, hub *Hub) *GameRoom {
 		players:           make(map[string]*Player),
 		bullets:           make(map[string]*Bullet),
 		clients:           make(map[*ClientConn]bool),
-		register:          make(chan *ClientConn),
-		unregister:        make(chan *ClientConn),
-		playerInputChan:   make(chan PlayerInputAction),
-		playerShootChan:   make(chan PlayerShootAction),
-		playerReadyChan:   make(chan string),
-		playerRestartChan: make(chan string),
+		register:          make(chan *ClientConn, 4),
+		unregister:        make(chan *ClientConn, 4),
+		playerInputChan:   make(chan PlayerInputAction, 16),
+		playerShootChan:   make(chan PlayerShootAction, 16),
+		playerReadyChan:   make(chan string, 4),
+		playerRestartChan: make(chan string, 4),
 		State:             StateWaitingForPlayers,
 		readyPlayers:      make(map[string]bool),
 	}
 }
 
+// getCreatorName returns a short player ID for display.
+// Caller must hold at least a read lock on gr.
 func (gr *GameRoom) getCreatorName() string {
-	gr.RLock()
-	defer gr.RUnlock()
 	for _, p := range gr.players {
 		return p.ID[:6]
 	}
@@ -137,15 +142,20 @@ func (gr *GameRoom) getCreatorName() string {
 }
 
 func (gr *GameRoom) Run() {
-	ticker := time.NewTicker(GameTickRate)
-	defer ticker.Stop()
+	// gameTicker drives physics at 60fps — only active during in_progress
+	gameTicker := time.NewTicker(GameTickRate)
+	defer gameTicker.Stop()
+
+	// idleTicker sends periodic state updates at 5fps when waiting/game_over,
+	// so clients stay in sync without burning CPU on 60 goroutine wakeups/s.
+	idleTicker := time.NewTicker(IdleTickRate)
+	defer idleTicker.Stop()
 
 	for {
 		select {
 		case client := <-gr.register:
 			gr.Lock()
 			gr.clients[client] = true
-			client.room = gr
 			playerID := client.id
 			newPlayer := &Player{
 				ID:               playerID,
@@ -160,31 +170,28 @@ func (gr *GameRoom) Run() {
 				conn:             client,
 			}
 			gr.players[playerID] = newPlayer
+			client.roomMu.Lock()
+			client.room = gr
 			client.player = newPlayer
+			client.roomMu.Unlock()
 			log.Printf("Player %s registered and added to game room %s.", playerID, gr.ID)
-
-			// --- MODIFIED: REMOVED a block of code that automatically started the game. ---
-			// The game now ONLY starts when both players are ready.
-
 			gr.Unlock()
+			// Immediately push current state to the new client
+			gr.broadcastGameState()
 
 		case client := <-gr.unregister:
 			gr.Lock()
 
-			// Log the unregister event
 			log.Printf("Processing unregister for client %s in room %s", client.id, gr.ID)
 
-			// Check if client was actually in this room
 			if _, ok := gr.clients[client]; !ok {
 				log.Printf("Client %s was not in room %s, skipping unregister", client.id, gr.ID)
 				gr.Unlock()
 				continue
 			}
 
-			// Store game state before removal
 			wasInProgress := gr.State == StateInProgress || gr.State == StateGameOver
 
-			// Remove client from room
 			delete(gr.clients, client)
 			if client.player != nil {
 				log.Printf("Player %s (%s) unregistered from room %s", client.player.Color, client.id, gr.ID)
@@ -192,32 +199,27 @@ func (gr *GameRoom) Run() {
 				delete(gr.readyPlayers, client.player.ID)
 			}
 
-			// Clear client's room reference
+			client.roomMu.Lock()
 			client.room = nil
 			client.player = nil
+			client.roomMu.Unlock()
 
-			// Reset game if player left mid-game
 			if wasInProgress && len(gr.players) < 2 {
 				log.Printf("Player left mid-game. Resetting room %s to waiting state.", gr.ID)
 				gr.resetGame()
 			}
 
-			// Check if room is now empty
 			if len(gr.clients) == 0 {
 				log.Printf("Room %s is now empty. Signalling hub for removal.", gr.ID)
 				gr.Unlock()
-
-				// Signal hub for removal in separate goroutine to avoid blocking
 				go func() {
 					gr.hub.unregisterRoom <- gr
 				}()
-				return // Stop this room's goroutine
+				return
 			}
 
 			gr.Unlock()
-
-			// Broadcast updated game state to remaining players (non-blocking)
-			go gr.broadcastGameState()
+			gr.broadcastGameState()
 
 		case playerID := <-gr.playerReadyChan:
 			gr.Lock()
@@ -233,6 +235,8 @@ func (gr *GameRoom) Run() {
 				}
 			}
 			gr.Unlock()
+			// Push ready/game-start state immediately — no need to wait for idle tick
+			gr.broadcastGameState()
 
 		case playerID := <-gr.playerRestartChan:
 			gr.Lock()
@@ -246,54 +250,100 @@ func (gr *GameRoom) Run() {
 				}
 			}
 			gr.Unlock()
+			gr.broadcastGameState()
 
 		case inputAction := <-gr.playerInputChan:
+			gr.Lock()
 			if gr.State == StateInProgress {
-				gr.Lock()
 				if player, ok := gr.players[inputAction.PlayerID]; ok {
 					player.InputX = inputAction.Input.X
 					player.InputY = inputAction.Input.Y
 				}
-				gr.Unlock()
 			}
+			gr.Unlock()
 
 		case shootAction := <-gr.playerShootChan:
+			gr.Lock()
 			if gr.State == StateInProgress {
-				gr.Lock()
 				if player, ok := gr.players[shootAction.PlayerID]; ok {
 					if player.ShootingCooldown <= 0 {
 						playerCenterX := player.X + player.Width/2
 						playerCenterY := player.Y + player.Height/2
 
-						direction := NewVector2D(shootAction.TargetPos.X-playerCenterX, shootAction.TargetPos.Y-playerCenterY).Normalize()
-
-						bulletID := uuid.NewString()
-						newBullet := &Bullet{
-							ID:                bulletID,
-							OwnerID:           player.ID,
-							X:                 playerCenterX,
-							Y:                 playerCenterY,
-							DirX:              direction.X,
-							DirY:              direction.Y,
-							Radius:            BulletRadius,
-							TimesCollidedWall: 0,
+						rawDir := NewVector2D(shootAction.TargetPos.X-playerCenterX, shootAction.TargetPos.Y-playerCenterY)
+						if rawDir.Magnitude() >= 0.001 {
+							direction := rawDir.Normalize()
+							bulletID := uuid.NewString()
+							newBullet := &Bullet{
+								ID:                bulletID,
+								OwnerID:           player.ID,
+								X:                 playerCenterX,
+								Y:                 playerCenterY,
+								DirX:              direction.X,
+								DirY:              direction.Y,
+								Radius:            BulletRadius,
+								TimesCollidedWall: 0,
+							}
+							gr.bullets[bulletID] = newBullet
+							player.ShootingCooldown = PlayerShootCooldown
+							log.Printf("Player %s shot. Bullet %s created.", player.ID, bulletID)
 						}
-						gr.bullets[bulletID] = newBullet
-						player.ShootingCooldown = PlayerShootCooldown
-						log.Printf("Player %s shot. Bullet %s created.", player.ID, bulletID)
 					}
 				}
-				gr.Unlock()
+			}
+			gr.Unlock()
+
+		case <-idleTicker.C:
+			// Low-frequency heartbeat for waiting/game_over — skip during in_progress
+			// (gameTicker handles that path instead)
+			gr.RLock()
+			notInProgress := gr.State != StateInProgress
+			gr.RUnlock()
+			if notInProgress {
+				gr.broadcastGameState()
 			}
 
-		case <-ticker.C:
-			if gr.State != StateInProgress {
-				gr.broadcastGameState()
+		case <-gameTicker.C:
+			// Physics tick — skip entirely when not in_progress
+			gr.RLock()
+			notInProgress := gr.State != StateInProgress
+			gr.RUnlock()
+			if notInProgress {
 				continue
 			}
 
 			deltaTime := GameTickRate.Seconds()
 			gr.Lock()
+
+			// Update round timer
+			gr.timeRemaining -= deltaTime
+			if gr.timeRemaining <= 0 {
+				gr.timeRemaining = 0
+				// Determine winner by HP
+				var highestHP int = -1
+				var winnerId string
+				var tie bool
+				for _, p := range gr.players {
+					if p.CurrentHP > highestHP {
+						highestHP = p.CurrentHP
+						winnerId = p.ID
+						tie = false
+					} else if p.CurrentHP == highestHP {
+						tie = true
+					}
+				}
+				if !tie {
+					gr.WinnerID = winnerId
+				} else {
+					gr.WinnerID = "" // draw
+				}
+				gr.State = StateGameOver
+				log.Printf("Round time expired in room %s. WinnerID: %s (tie=%v)", gr.ID, gr.WinnerID, tie)
+				gr.Unlock()
+				gr.broadcastGameState()
+				continue
+			}
+
 			// Update Players
 			for _, player := range gr.players {
 				if player.InputX != 0 || player.InputY != 0 {
@@ -420,70 +470,69 @@ func (gr *GameRoom) Run() {
 }
 
 func (gr *GameRoom) broadcastGameState() {
+	// Hold lock only long enough to copy state — never while sending
 	gr.RLock()
-	defer gr.RUnlock()
-
 	currentGameState := GameState{
-		Players:      make(map[string]*Player),
-		Bullets:      make(map[string]*Bullet),
-		State:        gr.State,
-		WinnerID:     gr.WinnerID,
-		ReadyPlayers: make(map[string]bool),
+		Players:          make(map[string]*Player, len(gr.players)),
+		Bullets:          make(map[string]*Bullet),
+		State:            gr.State,
+		WinnerID:         gr.WinnerID,
+		ReadyPlayers:     make(map[string]bool, len(gr.readyPlayers)),
+		TimeRemaining:    gr.timeRemaining,
+		ShootCooldownMax: PlayerShootCooldown,
 	}
-
-	// Deep copy ready players to avoid race conditions
 	for id, ready := range gr.readyPlayers {
 		currentGameState.ReadyPlayers[id] = ready
 	}
-
 	for id, p := range gr.players {
 		playerCopy := *p
 		playerCopy.conn = nil
 		currentGameState.Players[id] = &playerCopy
 	}
 	if gr.State == StateInProgress {
+		currentGameState.Bullets = make(map[string]*Bullet, len(gr.bullets))
 		for id, b := range gr.bullets {
 			bulletCopy := *b
 			currentGameState.Bullets[id] = &bulletCopy
 		}
 	}
-
-	message := Message{Type: "gameState", Payload: currentGameState}
-
-	// Create slice of clients to avoid holding lock while sending
 	clients := make([]*ClientConn, 0, len(gr.clients))
 	for client := range gr.clients {
 		clients = append(clients, client)
 	}
+	gr.RUnlock() // unlock before any sending
 
-	// Send to clients without holding the room lock
-	successCount := 0
+	message := Message{Type: "gameState", Payload: currentGameState}
+
 	for _, client := range clients {
 		select {
 		case client.send <- message:
-			successCount++
-		case <-time.After(50 * time.Millisecond):
-			// Client is slow, skip it to prevent blocking
-			log.Printf("Skipping slow client %s in room %s during game state broadcast", client.id, gr.ID)
+		default:
+			// Client send buffer full — drop this frame for that client
 		}
-	}
-
-	if successCount < len(clients) {
-		log.Printf("Game state broadcast: %d/%d clients reached in room %s", successCount, len(clients), gr.ID)
 	}
 }
 
 func (gr *GameRoom) startGame() {
 	gr.State = StateInProgress
 	gr.WinnerID = ""
+	gr.timeRemaining = RoundDuration
 	gr.bullets = make(map[string]*Bullet)
+
+	// Fixed spawn points: left side and right side, vertically centered
+	spawnPoints := []Vector2D{
+		{X: CanvasWidth * 0.15, Y: (CanvasHeight - PlayerHeight) / 2},
+		{X: CanvasWidth * 0.80, Y: (CanvasHeight - PlayerHeight) / 2},
+	}
+	i := 0
 	for _, p := range gr.players {
 		p.CurrentHP = PlayerMaxHP
-		p.X = rand.Float64() * (CanvasWidth - PlayerWidth)
-		p.Y = rand.Float64() * (CanvasHeight - PlayerHeight)
+		p.X = spawnPoints[i%2].X
+		p.Y = spawnPoints[i%2].Y
 		p.VelX = 0
 		p.VelY = 0
 		p.ShootingCooldown = 0
+		i++
 	}
 }
 
@@ -492,9 +541,16 @@ func (gr *GameRoom) resetGame() {
 	gr.WinnerID = ""
 	gr.readyPlayers = make(map[string]bool)
 	gr.bullets = make(map[string]*Bullet)
+	gr.timeRemaining = 0
+	spawnPoints := []Vector2D{
+		{X: CanvasWidth * 0.15, Y: (CanvasHeight - PlayerHeight) / 2},
+		{X: CanvasWidth * 0.80, Y: (CanvasHeight - PlayerHeight) / 2},
+	}
+	i := 0
 	for _, p := range gr.players {
 		p.CurrentHP = PlayerMaxHP
-		p.X = rand.Float64() * (CanvasWidth - PlayerWidth)
-		p.Y = rand.Float64() * (CanvasHeight - PlayerHeight)
+		p.X = spawnPoints[i%2].X
+		p.Y = spawnPoints[i%2].Y
+		i++
 	}
 }

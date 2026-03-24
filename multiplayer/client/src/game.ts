@@ -17,6 +17,8 @@ interface ServerGameStatePayload {
   state: string; // "waiting", "in_progress", "game_over"
   winnerId: string;
   readyPlayers: { [id: string]: boolean };
+  timeRemaining: number;
+  shootCooldownMax: number;
 }
 
 // Server payload for room info in the lobby
@@ -47,6 +49,8 @@ export class Game {
   private roomState: string = "waiting"; // The state of the game *inside* a room
   private winnerId: string | null = null;
   private amIReady: boolean = false;
+  private timeRemaining: number = 0;
+  private shootCooldownMax: number = 2;
 
   // --- DATA STORAGE ---
   private players: Map<string, Player> = new Map();
@@ -112,14 +116,21 @@ export class Game {
         // Clear old game data when returning to lobby
         this.players.clear();
         this.bullets.clear();
+        this.keysPressed = {};
         console.log("Received room list:", this.rooms);
+        break;
+
+      case "error":
+        console.error("Server error:", msg.payload?.message);
         break;
 
       case "gameState":
         this.clientState = "in_game";
         const statePayload = msg.payload as ServerGameStatePayload;
         this.roomState = statePayload.state;
-        this.winnerId = statePayload.winnerId;
+        this.winnerId = statePayload.winnerId || null;
+        this.timeRemaining = statePayload.timeRemaining ?? 0;
+        this.shootCooldownMax = statePayload.shootCooldownMax ?? 2;
 
         this.amIReady = this.myPlayerId
           ? statePayload.readyPlayers[this.myPlayerId] || false
@@ -457,7 +468,7 @@ export class Game {
 
     // --- Cooldown Panel ---
     const cooldownTime = me.getShootingCoolDownTime();
-    const maxCooldown = 2; // Should match server
+    const maxCooldown = this.shootCooldownMax;
     const iconSize = 40;
     const iconPos = new Vector2D(infoPanelPos.x, infoPanelPos.y + 25);
 
@@ -570,6 +581,18 @@ export class Game {
     });
   }
 
+  private drawTimer() {
+    const seconds = Math.ceil(this.timeRemaining);
+    const color = seconds <= 10 ? "red" : "white";
+    this.canvas.drawText(
+      `${seconds}s`,
+      new Vector2D(this.canvas.getWidth() / 2, 35),
+      color,
+      `bold 28px Arial`,
+      "center"
+    );
+  }
+
   private drawInGameContent() {
     switch (this.roomState) {
       case "waiting":
@@ -592,15 +615,19 @@ export class Game {
         this.drawPlayers();
         this.drawBullets();
         this.drawInGameUI();
+        this.drawTimer();
         break;
 
       case "game_over":
         this.drawPlayers();
-        const winner = this.players.get(this.winnerId!);
-        const winnerText =
-          winner?.id === this.myPlayerId ? "YOU WIN!" : `YOU LOSE!`;
         const centerX = this.canvas.getWidth() / 2;
         const centerY = this.canvas.getHeight() / 2;
+        let winnerText: string;
+        if (!this.winnerId) {
+          winnerText = "DRAW!";
+        } else {
+          winnerText = this.winnerId === this.myPlayerId ? "YOU WIN!" : "YOU LOSE!";
+        }
         this.canvas.drawText(
           "GAME OVER",
           new Vector2D(centerX, centerY - 40),

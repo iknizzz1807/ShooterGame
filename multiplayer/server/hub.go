@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 )
 
+
 const MaxPlayersPerRoom = 2
 
 // RoomInfo is a light-weight struct for broadcasting room list
@@ -26,17 +27,16 @@ type Hub struct {
 	unregister     chan *ClientConn
 	unregisterRoom chan *GameRoom
 	mu             sync.RWMutex
-	// Add shutdown flag
-	shutdown bool
+	shutdown       bool
 }
 
 func NewHub() *Hub {
 	return &Hub{
 		clients:        make(map[*ClientConn]bool),
 		rooms:          make(map[string]*GameRoom),
-		register:       make(chan *ClientConn),
-		unregister:     make(chan *ClientConn),
-		unregisterRoom: make(chan *GameRoom),
+		register:       make(chan *ClientConn, 512),
+		unregister:     make(chan *ClientConn, 512),
+		unregisterRoom: make(chan *GameRoom, 128),
 	}
 }
 
@@ -77,7 +77,10 @@ func (h *Hub) Run() {
 			h.mu.Lock()
 			if _, ok := h.rooms[room.ID]; ok {
 				delete(h.rooms, room.ID)
-				log.Printf("Room %s (%s) was empty and has been removed.", room.ID, room.getCreatorName())
+				room.RLock()
+				name := room.getCreatorName()
+				room.RUnlock()
+				log.Printf("Room %s (%s) was empty and has been removed.", room.ID, name)
 			}
 			h.mu.Unlock()
 
@@ -104,18 +107,14 @@ func (h *Hub) broadcastRoomList() {
 	}
 	h.mu.RUnlock()
 
-	// Send to clients without holding the main lock
-	successCount := 0
+	// Send to clients without holding the main lock — non-blocking, drop if full
 	for _, client := range clients {
 		select {
 		case client.send <- message:
-			successCount++
-		case <-time.After(100 * time.Millisecond):
-			// Client is slow/disconnected, skip it
-			log.Printf("Skipping slow lobby client %s during room list broadcast", client.id)
+		default:
 		}
 	}
-	log.Printf("Broadcasted room list to %d/%d clients in lobby.", successCount, len(clients))
+	log.Printf("Broadcasted room list to %d clients in lobby.", len(clients))
 }
 
 func (h *Hub) sendRoomList(client *ClientConn) {
@@ -152,49 +151,43 @@ func (h *Hub) getRoomInfoList() []RoomInfo {
 
 func (h *Hub) createRoom(creator *ClientConn) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	if h.shutdown {
+		h.mu.Unlock()
 		return
 	}
 
 	roomID := uuid.NewString()
 	room := NewGameRoom(roomID, h)
 	h.rooms[roomID] = room
-	go room.Run()
+	delete(h.clients, creator)
+	h.mu.Unlock() // ← unlock hub NGAY, không giữ trong khi setup room
 
+	go room.Run()
 	log.Printf("Client %s created a new room %s", creator.id, roomID)
 
-	// Move creator from hub to the new room
-	delete(h.clients, creator)
-
-	// Register creator with room in separate goroutine to avoid blocking
+	// Register qua channel — room.Run() xử lý, consistent state
+	// Chạy trong goroutine riêng, broadcast SAU KHI creator thật sự vào room
 	go func() {
 		room.register <- creator
+		go h.broadcastRoomList()
 	}()
-
-	// Broadcast room list update
-	go h.broadcastRoomList()
 }
 
 func (h *Hub) joinRoom(client *ClientConn, roomID string) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	if h.shutdown {
+		h.mu.Unlock()
 		return
 	}
 
 	room, ok := h.rooms[roomID]
 	if !ok {
+		h.mu.Unlock()
 		log.Printf("Client %s failed to join non-existent room %s", client.id, roomID)
-		// Send error message to client
-		go func() {
-			select {
-			case client.send <- Message{Type: "error", Payload: "Room not found"}:
-			case <-time.After(time.Second):
-			}
-		}()
+		select {
+		case client.send <- Message{Type: "error", Payload: map[string]string{"message": "Room not found"}}:
+		default:
+		}
 		return
 	}
 
@@ -203,43 +196,40 @@ func (h *Hub) joinRoom(client *ClientConn, roomID string) {
 	room.RUnlock()
 
 	if isFull {
+		h.mu.Unlock()
 		log.Printf("Client %s failed to join full room %s", client.id, roomID)
-		// Send error message to client
-		go func() {
-			select {
-			case client.send <- Message{Type: "error", Payload: "Room is full"}:
-			case <-time.After(time.Second):
-			}
-		}()
+		select {
+		case client.send <- Message{Type: "error", Payload: map[string]string{"message": "Room is full"}}:
+		default:
+		}
 		return
 	}
 
+	delete(h.clients, client)
+	h.mu.Unlock() // ← unlock hub trước khi gửi vào room.register channel
+
 	log.Printf("Client %s is joining room %s", client.id, roomID)
-	delete(h.clients, client) // Move client from hub
 
-	// Register with room in separate goroutine
-	go func() {
-		room.register <- client
-	}()
+	// Gửi vào room.register — block goroutine này (readPump), không block Hub
+	room.register <- client
 
-	// Broadcast room list update
+	// Broadcast SAU KHI client đã vào room → playerCount đúng
 	go h.broadcastRoomList()
 }
 
 func (h *Hub) leaveRoom(client *ClientConn) {
-	// Check if client is actually in a room
-	if client.room == nil {
+	client.roomMu.Lock()
+	room := client.room
+	client.roomMu.Unlock()
+
+	if room == nil {
 		log.Printf("Client %s attempted to leave room but is not in any room", client.id)
 		return
 	}
-
-	room := client.room
 	log.Printf("Client %s is leaving room %s", client.id, room.ID)
 
-	h.mu.Lock()
+	// Step 1: remove from room (room lock only)
 	room.Lock()
-
-	// Remove client from room
 	if _, ok := room.clients[client]; ok {
 		delete(room.clients, client)
 		if client.player != nil {
@@ -247,38 +237,35 @@ func (h *Hub) leaveRoom(client *ClientConn) {
 			delete(room.readyPlayers, client.player.ID)
 		}
 	}
-
-	// Add client back to hub lobby
-	client.room = nil
-	client.player = nil
-	h.clients[client] = true
-
-	// Check if room should be reset due to mid-game leave
 	wasInProgress := room.State == StateInProgress || room.State == StateGameOver
 	if wasInProgress && len(room.players) < 2 {
 		log.Printf("Player left mid-game. Resetting room %s to waiting state.", room.ID)
 		room.resetGame()
 	}
-
-	// Check if room is now empty and should be removed
 	roomShouldBeRemoved := len(room.clients) == 0
-
 	room.Unlock()
+
+	// Step 2: clear client's room ref
+	client.roomMu.Lock()
+	client.room = nil
+	client.player = nil
+	client.roomMu.Unlock()
+
+	// Step 3: add back to hub lobby (hub lock only)
+	h.mu.Lock()
+	h.clients[client] = true
 	h.mu.Unlock()
 
-	// Send room list to the client who just left (in separate goroutine)
+	log.Printf("Client %s successfully returned to lobby", client.id)
+
 	go h.sendRoomList(client)
 
-	// If room is empty, signal for removal
 	if roomShouldBeRemoved {
 		log.Printf("Room %s is now empty, signaling for removal", room.ID)
 		go func() {
 			h.unregisterRoom <- room
 		}()
 	} else {
-		// Broadcast updated room list to lobby clients
 		go h.broadcastRoomList()
 	}
-
-	log.Printf("Client %s successfully returned to lobby", client.id)
 }

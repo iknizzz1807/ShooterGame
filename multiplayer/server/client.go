@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -26,6 +27,7 @@ type ClientConn struct {
 	send   chan Message
 	player *Player
 	room   *GameRoom
+	roomMu sync.Mutex // protects room and player fields accessed from multiple goroutines
 	// Add close channel to coordinate goroutine shutdown
 	done chan struct{}
 }
@@ -54,10 +56,14 @@ func (c *ClientConn) readPump() {
 		// Signal writePump to stop
 		close(c.done)
 
-		// Cleanup based on current state
-		if c.room != nil {
+		// Cleanup based on current state — read room under lock to avoid race
+		c.roomMu.Lock()
+		room := c.room
+		c.roomMu.Unlock()
+
+		if room != nil {
 			// If client is in a room, notify the room about disconnection
-			c.room.unregister <- c
+			room.unregister <- c
 		} else {
 			// If client is in lobby, notify the hub
 			c.hub.unregister <- c
@@ -90,17 +96,28 @@ func (c *ClientConn) readPump() {
 		}
 
 		// Process message based on client's current context
-		if c.room != nil {
-			// Client is in a room, route game actions to the room
+		c.roomMu.Lock()
+		inRoom := c.room != nil
+		c.roomMu.Unlock()
+
+		if inRoom {
 			c.handleRoomMessage(msg)
 		} else {
-			// Client is in lobby, handle lobby actions
 			c.handleLobbyMessage(msg)
 		}
 	}
 }
 
 func (c *ClientConn) handleRoomMessage(msg Message) {
+	// Snapshot room under lock so we have a stable reference
+	c.roomMu.Lock()
+	room := c.room
+	c.roomMu.Unlock()
+
+	if room == nil {
+		return
+	}
+
 	switch msg.Type {
 	case "input":
 		payloadMap, ok := msg.Payload.(map[string]interface{})
@@ -115,12 +132,12 @@ func (c *ClientConn) handleRoomMessage(msg Message) {
 			return
 		}
 		select {
-		case c.room.playerInputChan <- PlayerInputAction{
+		case room.playerInputChan <- PlayerInputAction{
 			PlayerID: c.id,
 			Input:    NewVector2D(inputX, inputY),
 		}:
 		default:
-			log.Printf("Player input channel full for room %s", c.room.ID)
+			log.Printf("Player input channel full for room %s", room.ID)
 		}
 
 	case "shoot":
@@ -136,31 +153,30 @@ func (c *ClientConn) handleRoomMessage(msg Message) {
 			return
 		}
 		select {
-		case c.room.playerShootChan <- PlayerShootAction{
+		case room.playerShootChan <- PlayerShootAction{
 			PlayerID:  c.id,
 			TargetPos: NewVector2D(targetX, targetY),
 		}:
 		default:
-			log.Printf("Player shoot channel full for room %s", c.room.ID)
+			log.Printf("Player shoot channel full for room %s", room.ID)
 		}
 
 	case "ready":
 		select {
-		case c.room.playerReadyChan <- c.id:
+		case room.playerReadyChan <- c.id:
 		default:
-			log.Printf("Player ready channel full for room %s", c.room.ID)
+			log.Printf("Player ready channel full for room %s", room.ID)
 		}
 
 	case "restart":
 		select {
-		case c.room.playerRestartChan <- c.id:
+		case room.playerRestartChan <- c.id:
 		default:
-			log.Printf("Player restart channel full for room %s", c.room.ID)
+			log.Printf("Player restart channel full for room %s", room.ID)
 		}
 
 	case "leave_room":
-		log.Printf("Client %s requested to leave room %s", c.id, c.room.ID)
-		// Use hub's leaveRoom method for proper cleanup
+		log.Printf("Client %s requested to leave room %s", c.id, room.ID)
 		c.hub.leaveRoom(c)
 
 	default:

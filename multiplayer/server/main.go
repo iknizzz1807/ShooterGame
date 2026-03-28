@@ -31,7 +31,12 @@ func main() {
 	})
 
 	// Serve client static files
-	fs := http.FileServer(http.Dir("./client"))
+	// Try ./client first (Railway/Docker), fallback to ../client (local dev)
+	clientDir := "./client"
+	if _, err := http.Dir(clientDir).Open("/"); err != nil {
+		clientDir = "../client"
+	}
+	fs := http.FileServer(http.Dir(clientDir))
 	http.Handle("/", fs)
 
 	log.Println("Server starting on", listenAddr)

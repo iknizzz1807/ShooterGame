@@ -1,5 +1,6 @@
 export class Canvas {
     constructor() {
+        this.bgCanvas = null;
         const canvasElement = document.getElementById("canvas");
         if (!canvasElement) {
             throw new Error("Canvas element with ID 'canvas' not found.");
@@ -14,10 +15,31 @@ export class Canvas {
         this.height = 650;
         this.canvas.width = this.width;
         this.canvas.height = this.height;
+        // Create offscreen canvas for background caching
+        this._initBackgroundCache();
     }
-    // Dark military desert background
+    _initBackgroundCache() {
+        this.bgCanvas = document.createElement("canvas");
+        this.bgCanvas.width = this.width;
+        this.bgCanvas.height = this.height;
+        const bgCtx = this.bgCanvas.getContext("2d");
+        if (!bgCtx)
+            return;
+        // Draw static background once to offscreen canvas
+        this._drawBackground(bgCtx);
+    }
+    // Dark military desert background - now draws cached background
     initCanvas() {
-        const ctx = this.ctx;
+        if (this.bgCanvas) {
+            // Draw cached background - much faster than redrawing everything
+            this.ctx.drawImage(this.bgCanvas, 0, 0);
+            return;
+        }
+        // Fallback if cache not available
+        this._drawBackground(this.ctx);
+    }
+    // Draw static background to any context
+    _drawBackground(ctx) {
         // Base ground — sandy dark
         ctx.fillStyle = "#2a2010";
         ctx.fillRect(0, 0, this.width, this.height);
@@ -38,15 +60,14 @@ export class Canvas {
             ctx.stroke();
         }
         // Corner blast marks
-        this._drawBlastMark(60, 60, 40);
-        this._drawBlastMark(this.width - 60, 60, 35);
-        this._drawBlastMark(60, this.height - 60, 38);
-        this._drawBlastMark(this.width - 60, this.height - 60, 42);
+        this._drawBlastMark(ctx, 60, 60, 40);
+        this._drawBlastMark(ctx, this.width - 60, 60, 35);
+        this._drawBlastMark(ctx, 60, this.height - 60, 38);
+        this._drawBlastMark(ctx, this.width - 60, this.height - 60, 42);
         // Wall border — concrete slabs
-        this._drawWallBorder();
+        this._drawWallBorder(ctx);
     }
-    _drawBlastMark(cx, cy, r) {
-        const ctx = this.ctx;
+    _drawBlastMark(ctx, cx, cy, r) {
         const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
         grad.addColorStop(0, "rgba(10,8,4,0.7)");
         grad.addColorStop(0.5, "rgba(40,30,10,0.4)");
@@ -67,8 +88,7 @@ export class Canvas {
             ctx.stroke();
         }
     }
-    _drawWallBorder() {
-        const ctx = this.ctx;
+    _drawWallBorder(ctx) {
         const t = 18; // wall thickness
         const slabW = 52;
         const slabH = t;

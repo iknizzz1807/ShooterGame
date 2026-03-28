@@ -24,6 +24,7 @@ const (
 	CanvasHeight        = 650.0
 	GameTickRate        = time.Second / 60   // physics tick: 60fps during in_progress
 	IdleTickRate        = time.Second / 5    // heartbeat: 5fps during waiting/game_over
+	BroadcastTickRate      = time.Second / 30 // broadcast state at 30fps (reduced from 60)
 	RoundDuration       = 180.0             // seconds
 )
 
@@ -147,10 +148,14 @@ func (gr *GameRoom) Run() {
 	gameTicker := time.NewTicker(GameTickRate)
 	defer gameTicker.Stop()
 
-	// idleTicker sends periodic state updates at 5fps when waiting/game_over,
-	// so clients stay in sync without burning CPU on 60 goroutine wakeups/s.
+	// idleTicker sends periodic state updates at 5fps when waiting/game_over
+	// so clients stay in sync without burning CPU on 60 goroutine wakeups/s
 	idleTicker := time.NewTicker(IdleTickRate)
 	defer idleTicker.Stop()
+
+	// broadcastTicker drives state broadcasts at 30fps — only active during in_progress
+	broadcastTicker := time.NewTicker(BroadcastTickRate)
+	defer broadcastTicker.Stop()
 
 	for {
 		select {
@@ -303,6 +308,16 @@ func (gr *GameRoom) Run() {
 			if notInProgress {
 				gr.broadcastGameState()
 			}
+
+		case <-broadcastTicker.C:
+			// Broadcast state at 30fps — skip when not in_progress
+			gr.RLock()
+			notInProgress := gr.State != StateInProgress
+			gr.RUnlock()
+			if notInProgress {
+				continue
+			}
+			gr.broadcastGameState()
 
 		case <-gameTicker.C:
 			// Physics tick — skip entirely when not in_progress
@@ -465,7 +480,7 @@ func (gr *GameRoom) Run() {
 			gr.bullets = activeBullets
 
 			gr.Unlock()
-			gr.broadcastGameState()
+			// Note: broadcast is now handled by broadcastTicker at 30fps
 		}
 	}
 }

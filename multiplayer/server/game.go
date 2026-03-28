@@ -22,7 +22,7 @@ const (
 	BulletSpeed         = 1000.0
 	CanvasWidth         = 1300.0
 	CanvasHeight        = 650.0
-	GameTickRate        = time.Second / 60   // physics tick: 60fps during in_progress
+	GameTickRate        = time.Second / 30   // physics tick: 30fps during in_progress
 	IdleTickRate        = time.Second / 5    // heartbeat: 5fps during waiting/game_over
 	BroadcastTickRate      = time.Second / 30 // broadcast state at 30fps (reduced from 60)
 	RoundDuration       = 180.0             // seconds

@@ -1,6 +1,7 @@
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "multiplayer/Dockerfile"
+context = "multiplayer"
 
 [deploy]
 startCommand = "/app/game-server"

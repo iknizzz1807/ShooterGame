@@ -133,8 +133,8 @@ export class Game {
   // --- NETWORK ---
 
   private connectWebSocket() {
-    const serverHost = "localhost:8080";
-    this.ws = new WebSocket(`ws://${serverHost}/ws`);
+    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    this.ws = new WebSocket(`${protocol}//${location.host}/ws`);
 
     this.ws.onopen = () => {
       console.log("Connected to game server.");
